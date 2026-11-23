@@ -1,0 +1,132 @@
+'use client';
+
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { InputsForm } from '@/components/InputsForm';
+import { Report } from '@/components/Report';
+import { fromForm, toForm } from '@/lib/fields';
+import { score } from '@/lib/score';
+import type { AnalyzeResponse, Meta, Year } from '@/lib/types';
+
+/** Dipakai kalau belum ada kode tersimpan. */
+const QUICK = ['BBCA', 'BBRI', 'BMRI', 'TLKM', 'ASII', 'ICBP'];
+const clean = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
+
+export default function Home() {
+  const [code, setCode] = useState('');
+  const [form, setForm] = useState(() => toForm({}));
+  const [meta, setMeta] = useState<Meta | null>(null);
+  const [history, setHistory] = useState<Year[]>([]);
+  const [quick, setQuick] = useState<string[]>(QUICK);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const inputs = useMemo(() => fromForm(form), [form]);
+  const result = useMemo(() => score(inputs, history), [inputs, history]);
+
+  // Tombol cepat = saham yang sudah tersimpan (di Vercel: yang sudah di-sync dari Mac).
+  const loadCodes = () =>
+    fetch('/api/codes')
+      .then((r) => r.json())
+      .then((j: { codes?: string[] }) => j.codes?.length && setQuick(j.codes))
+      .catch(() => {});
+  useEffect(() => {
+    loadCodes();
+  }, []);
+
+  async function load(req: () => Promise<Response>) {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await req();
+      const json = await res.json();
+      if (!res.ok) return setError(json.error);
+      const data = json as AnalyzeResponse;
+      setForm(toForm(data.inputs));
+      setMeta(data.meta);
+      setHistory(data.history ?? []);
+      loadCodes();
+      setCode(data.inputs.ticker);
+    } catch {
+      setError('Server tidak merespons. Pastikan npm run dev masih berjalan.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const check = (c: string) => {
+    if (c.length < 4 || busy) return;
+    setCode(c);
+    load(() => fetch(`/api/analyze?code=${c}`));
+  };
+
+  const submit = (e: FormEvent) => {
+    e.preventDefault();
+    (document.activeElement as HTMLElement | null)?.blur(); // tutup keyboard di HP
+    check(code);
+  };
+
+  const upload = (file?: File) => {
+    if (!file) return;
+    const body = new FormData();
+    body.append('file', file);
+    body.append('code', code);
+    load(() => fetch('/api/analyze', { method: 'POST', body }));
+  };
+
+  return (
+    <main className="wrap">
+      <header className="top">
+        <h1>Cek Saham</h1>
+        <p>Kesehatan emiten BEI dari tren laporan keuangan 5 tahun terakhir.</p>
+      </header>
+
+      <div className="bar">
+        <form className="search" role="search" onSubmit={submit}>
+          <input
+            aria-label="Kode saham"
+            placeholder="Kode saham, mis. BBCA"
+            value={code}
+            maxLength={6}
+            autoCapitalize="characters"
+            autoCorrect="off"
+            autoComplete="off"
+            spellCheck={false}
+            enterKeyHint="search"
+            onChange={(e) => setCode(clean(e.target.value))}
+          />
+          <button className="btn" disabled={busy || code.length < 4} aria-label={busy ? 'Memuat' : 'Cek saham'}>
+            {busy ? <span className="spin" aria-hidden /> : 'Cek'}
+          </button>
+        </form>
+      </div>
+
+      <div className="quick" aria-label="Pilihan cepat">
+        {quick.map((c) => (
+          <button key={c} type="button" className="chip" disabled={busy} onClick={() => check(c)}>{c}</button>
+        ))}
+        <label className="chip ghost">
+          Unggah Excel IDX
+          <input className="sr" type="file" accept=".xlsx,.xls" disabled={busy} onChange={(e) => { upload(e.target.files?.[0]); e.target.value = ''; }} />
+        </label>
+      </div>
+      {error && <p className="error" role="alert">{error}</p>}
+
+      <div className="grid">
+        {busy ? (
+          <section className="card loading" aria-live="polite">
+            <div className="spin" aria-hidden />
+            <b>Mengambil laporan {code}…</b>
+            <p>Kalau jendela Chrome di komputer meminta verifikasi Cloudflare, selesaikan di sana. Aplikasi menunggu hingga 3 menit.</p>
+          </section>
+        ) : meta || form.ticker ? (
+          <Report inputs={inputs} result={result} meta={meta} />
+        ) : (
+          <section className="card empty">
+            <b>Mulai dengan kode saham</b>
+            <p>Ketik kode emiten atau pilih salah satu di atas. Laporan 5 tahun terakhir diambil dari IDX lalu dinilai otomatis.</p>
+          </section>
+        )}
+        <InputsForm form={form} onChange={setForm} />
+      </div>
+    </main>
+  );
+}
