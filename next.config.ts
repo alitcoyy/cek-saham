@@ -6,9 +6,12 @@ const nextConfig: NextConfig = {
   partialPrefetching: true,
   // Supaya hot reload jalan saat dibuka dari HP lewat IP lokal (mis. http://192.168.1.10:3000).
   allowedDevOrigins: ['192.168.*.*', '10.*.*.*'],
-  // Chromium serverless untuk PDF di Vercel: jangan dibundel, dan sertakan file biner terkompresinya.
+  // Chromium serverless untuk PDF di Vercel: jangan dibundel, dan sertakan file yang dimuat dinamis
+  // (biner Chromium terkompresi, browsers.json dan berkas lain playwright-core) yang tidak terlacak otomatis.
   serverExternalPackages: ['@sparticuz/chromium'],
-  outputFileTracingIncludes: { '/api/pdf': ['./node_modules/@sparticuz/chromium/bin/**'] },
+  outputFileTracingIncludes: {
+    '/api/pdf': ['./node_modules/@sparticuz/chromium/bin/**', './node_modules/playwright-core/**'],
+  },
 };
 
 export default nextConfig;
