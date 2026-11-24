@@ -45,8 +45,8 @@ kode saham ─► /api/analyze ─► cache .cache/BBCA-2025.xlsx, -2023, -2021 
 | `lib/trend.ts` | Metrik dan geometri grafik tren (dipakai situs dan PDF) |
 | `lib/pdf.ts`, `app/api/pdf` | Laporan PDF A4: HTML bertema situs dicetak oleh Chrome headless |
 | `lib/price.ts` | Harga saham dan kurs USD/IDR |
-| `lib/cache.ts` | Penyimpanan laporan: Vercel Blob kalau ada token, selain itu folder `.cache/` |
-| `scripts/sync.ts` | `npm run sync`: tarik dari IDX di Mac, simpan ke Blob |
+| `lib/cache.ts` | Penyimpanan hasil olahan (JSON per emiten + indeks): Vercel Blob kalau ada token, selain itu folder `.cache/` |
+| `scripts/sync.ts` | `npm run sync KODE…` atau `npm run sync all`: tarik dari IDX di Mac, simpan ke Blob |
 | `proxy.ts` | Kata sandi untuk versi online (`APP_PASSWORD`) |
 | `app/api/debug` | Melihat isi baris Excel untuk menyetel pola |
 
@@ -69,11 +69,21 @@ Versi online tidak bisa menarik data IDX sendiri, karena butuh Chrome asli dan v
 5. Di Mac: buka store Blob → tab `.env.local` → salin `BLOB_READ_WRITE_TOKEN` ke file `.env.local` di folder ini.
 6. `npm run sync BBCA TLKM` (tambahkan kode lain sesukanya). Buka URL Vercel di HP, masukkan kata sandi (nama pengguna bebas).
 
+**Mengisi semua emiten sekaligus**
+
+```bash
+caffeinate -i npm run sync all
+```
+
+Menarik laporan semua emiten BEI (sekitar 900-an) dalam 1–2 jam, dengan jeda supaya tidak membebani IDX. `caffeinate -i` menjaga Mac tidak tidur selama proses. Emiten yang sudah terbaru dilewati, jadi aman dihentikan dengan Ctrl+C lalu dijalankan lagi untuk melanjutkan. Kalau Cloudflare meminta verifikasi, centang di jendela Chrome.
+
 **Pemakaian rutin**
 
-- Saham baru: `npm run sync KODE` di Mac, atau unggah Excel dari idx.co.id langsung di HP.
-- Setelah laporan tahunan baru terbit (sekitar April): `npm run sync` tanpa kode memperbarui semua saham tersimpan.
-- Selama `.env.local` berisi token, `npm run dev` di Mac juga membaca dan menyimpan ke Blob, jadi saham yang dicek di Mac ikut muncul di HP.
+- Setelah laporan tahunan baru terbit (sekitar April): `npm run sync all` lagi. Hanya emiten yang laporan barunya sudah ada yang ditarik ulang.
+- Satu emiten tertentu: `npm run sync HRTA`, atau unggah Excel dari idx.co.id langsung di HP.
+- Selama `.env.local` berisi token, `npm run dev` di Mac juga membaca dan menyimpan ke Blob.
+
+**Kuota Blob (Hobby):** setiap emiten disimpan sebagai satu file JSON sekitar 2–3 KB, jadi seluruh BEI hanya beberapa MB. Satu kali `sync all` memakai sekitar 1.000 dari 2.000 operasi tulis gratis per bulan; jangan jalankan `npm run sync all force` lebih dari sekali sebulan.
 
 ## Kalau ada masalah
 

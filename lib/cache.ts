@@ -1,107 +1,85 @@
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Report } from './idx';
+import type { Stored } from './types';
 
 /**
- * Penyimpanan laporan. Dua tempat, dipilih otomatis:
- * - Vercel Blob (store private) kalau BLOB_READ_WRITE_TOKEN / BLOB_STORE_ID ada, dipakai di Vercel dan oleh
- *   `npm run sync` di Mac supaya data yang ditarik lewat Chrome bisa dibaca dari HP;
- * - folder .cache/ untuk pemakaian lokal murni.
+ * Penyimpanan hasil olahan: satu file JSON kecil per emiten plus indeks.
+ * - Vercel Blob (store private) kalau BLOB_READ_WRITE_TOKEN / BLOB_STORE_ID ada: dipakai Vercel dan `npm run sync`.
+ * - Folder .cache/ untuk pemakaian lokal murni; di sini file Excel aslinya juga disimpan untuk /api/debug.
+ * Satu tulis per emiten menjaga pemakaian tetap di bawah kuota Blob Hobby (2.000 tulis per bulan).
  */
 export const blobEnabled = () => Boolean(process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID);
 
-/** Laporan tahunan jarang berubah; setelah 7 hari mode lokal menarik ulang dari IDX. Blob tidak kedaluwarsa. */
+/** Mode lokal menarik ulang dari IDX setelah 7 hari; data di Blob diperbarui lewat `npm run sync`. */
 const TTL = 7 * 24 * 60 * 60 * 1000;
 
-interface CacheMeta {
-  savedAt: number;
-  files: { year: number; file: string }[];
-}
-
-interface Backend {
-  read(code: string, name: string): Promise<Uint8Array | null>;
-  write(code: string, name: string, data: Uint8Array | string): Promise<void>;
-  codes(): Promise<string[]>;
-}
+/** Indeks: kode → tahun buku terbaru yang tersimpan. Dipakai sync untuk melewati emiten yang sudah terbaru. */
+export type Index = Record<string, { year: number; savedAt: number }>;
 
 const DIR = path.join(process.cwd(), '.cache');
-// Nama file lama dipertahankan: BBCA.json dan BBCA-2025.xlsx.
-const fsName = (code: string, name: string) => path.join(DIR, name === 'meta.json' ? `${code}.json` : `${code}-${name}`);
 
-const fsBackend: Backend = {
-  read: (code, name) => readFile(fsName(code, name)).then((b) => new Uint8Array(b), () => null),
-  async write(code, name, data) {
-    await mkdir(DIR, { recursive: true });
-    await writeFile(fsName(code, name), data);
-  },
-  async codes() {
-    const files = await readdir(DIR).catch(() => []);
-    return files.flatMap((f) => /^([A-Z0-9]{4,6})\.json$/.exec(f)?.[1] ?? []);
-  },
-};
-
-const BLOB_OPTS = { access: 'private', addRandomSuffix: false, allowOverwrite: true } as const;
-const INDEX = 'reports/index.json';
-
-async function blobRead(pathname: string): Promise<Uint8Array | null> {
+async function read(name: string): Promise<string | null> {
+  if (!blobEnabled()) return readFile(path.join(DIR, name), 'utf8').catch(() => null);
   const { get } = await import('@vercel/blob');
-  const r = await get(pathname, { access: 'private', useCache: false });
-  return r?.statusCode === 200 ? new Uint8Array(await new Response(r.stream).arrayBuffer()) : null;
+  const r = await get(name, { access: 'private', useCache: false }).catch(() => null);
+  return r?.statusCode === 200 ? new Response(r.stream).text() : null;
 }
 
-const blobBackend: Backend = {
-  read: (code, name) => blobRead(`reports/${code}/${name}`),
-  async write(code, name, data) {
-    const { put } = await import('@vercel/blob');
-    const json = typeof data === 'string';
-    await put(`reports/${code}/${name}`, json ? data : Buffer.from(data), {
-      ...BLOB_OPTS,
-      contentType: json ? 'application/json' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    });
-    if (!json) return;
-    // Daftar kode disimpan di satu file supaya halaman depan cukup satu kali baca, tanpa operasi list.
-    const codes = new Set(await this.codes());
-    if (codes.has(code)) return;
-    codes.add(code);
-    await put(INDEX, JSON.stringify([...codes].sort()), { ...BLOB_OPTS, contentType: 'application/json' });
-  },
-  async codes() {
-    const raw = await blobRead(INDEX).catch(() => null);
-    return raw ? JSON.parse(new TextDecoder().decode(raw)) : [];
-  },
-};
+async function write(name: string, json: string) {
+  if (!blobEnabled()) {
+    await mkdir(path.dirname(path.join(DIR, name)), { recursive: true });
+    return writeFile(path.join(DIR, name), json);
+  }
+  const { put } = await import('@vercel/blob');
+  await put(name, json, { access: 'private', addRandomSuffix: false, allowOverwrite: true, contentType: 'application/json' });
+}
 
-const store = (): Backend => (blobEnabled() ? blobBackend : fsBackend);
+const dataName = (code: string) => `data/${code}.json`;
+const INDEX = 'data/index.json';
 
-async function readMeta(code: string): Promise<CacheMeta | null> {
+/** Hasil olahan tersimpan untuk satu kode, atau null. */
+export async function getStored(code: string, ignoreTtl = false): Promise<Stored | null> {
+  const raw = await read(dataName(code));
+  if (!raw) return null;
   try {
-    const raw = await store().read(code, 'meta.json');
-    const meta = raw && JSON.parse(new TextDecoder().decode(raw));
-    return Array.isArray(meta?.files) ? meta : null; // format lama (satu file) dianggap kosong
+    const s = JSON.parse(raw) as Stored;
+    if (!ignoreTtl && !blobEnabled() && Date.now() - s.savedAt > TTL) return null;
+    return s;
   } catch {
     return null;
   }
 }
 
-/** Semua laporan tersimpan untuk satu kode, terbaru lebih dulu. */
-export async function getCached(code: string, ignoreTtl = false): Promise<Report[] | null> {
-  const meta = await readMeta(code);
-  if (!meta?.files.length || (!ignoreTtl && !blobEnabled() && Date.now() - meta.savedAt > TTL)) return null;
-  const out = await Promise.all(meta.files.map(async (f) => ({ ...f, buf: await store().read(code, `${f.year}.xlsx`) })));
-  if (out.some((r) => !r.buf)) return null;
-  return (out as Report[]).sort((a, b) => b.year - a.year);
+export async function readIndex(): Promise<Index> {
+  try {
+    return JSON.parse((await read(INDEX)) ?? '{}');
+  } catch {
+    return {};
+  }
 }
 
-/** Simpan laporan. merge=true mempertahankan tahun lain yang sudah tersimpan (untuk unggahan manual). */
-export async function putCached(code: string, reports: Report[], merge = false): Promise<Report[]> {
-  const old = merge ? ((await getCached(code, true)) ?? []) : [];
-  const years = new Set(reports.map((r) => r.year));
-  const all = [...reports, ...old.filter((r) => !years.has(r.year))].sort((a, b) => b.year - a.year);
-  await Promise.all(reports.map((r) => store().write(code, `${r.year}.xlsx`, r.buf)));
-  const meta: CacheMeta = { savedAt: Date.now(), files: all.map(({ year, file }) => ({ year, file })) };
-  await store().write(code, 'meta.json', JSON.stringify(meta));
-  return all;
+export const writeIndex = (ix: Index) => write(INDEX, JSON.stringify(ix));
+
+/** Simpan hasil olahan. index=false untuk sync massal, yang menulis indeks sekaligus secara berkala. */
+export async function putStored(code: string, s: Stored, index = true) {
+  await write(dataName(code), JSON.stringify(s));
+  if (index) await writeIndex({ ...(await readIndex()), [code]: { year: s.meta.year, savedAt: s.savedAt } });
 }
 
-/** Kode yang sudah tersimpan, untuk tombol cepat di halaman depan. */
-export const storedCodes = () => store().codes().catch(() => [] as string[]);
+/** Mode lokal: simpan juga file Excel aslinya untuk /api/debug (tidak dilakukan di Blob, demi kuota). */
+export async function saveXlsx(code: string, reports: Report[]) {
+  if (blobEnabled()) return;
+  await mkdir(path.join(DIR, 'xlsx'), { recursive: true });
+  await Promise.all(reports.map((r) => writeFile(path.join(DIR, 'xlsx', `${code}-${r.year}.xlsx`), r.buf)));
+}
+
+/** File Excel tersimpan secara lokal (terbaru lebih dulu), untuk /api/debug. */
+export async function readXlsx(code: string): Promise<Report[]> {
+  const dir = path.join(DIR, 'xlsx');
+  const names = (await readdir(dir).catch(() => [])).filter((f) => f.startsWith(`${code}-`) && f.endsWith('.xlsx'));
+  const out = await Promise.all(
+    names.map(async (f) => ({ year: Number(f.slice(code.length + 1, code.length + 5)), file: f, buf: new Uint8Array(await readFile(path.join(dir, f))) })),
+  );
+  return out.sort((a, b) => b.year - a.year);
+}

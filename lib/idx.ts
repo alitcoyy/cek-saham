@@ -160,6 +160,45 @@ async function findXlsx(code: string, year: number): Promise<Attachment | undefi
   return xlsx.find((f) => /financialstatement/i.test(f.File_Name)) ?? xlsx[0];
 }
 
+/** Apakah laporan tahunan (Excel) untuk tahun ini sudah terbit di IDX. */
+export const hasAnnual = async (code: string, year: number) => Boolean(await findXlsx(code, year));
+
+const CODE = /^[A-Z0-9]{4}$/;
+const codeOf = (r: Record<string, unknown>) => String(r.KodeEmiten ?? r.Kode_Emiten ?? r.kodeEmiten ?? '').trim().toUpperCase();
+
+/** Kode emiten yang punya laporan tahunan diaudit untuk tahun ini (daftar laporan IDX tanpa filter kode). */
+async function codesWithAnnual(year: number): Promise<Set<string>> {
+  const out = new Set<string>();
+  const size = 500;
+  for (let from = 0; from < 10_000; from += size) {
+    const q = new URLSearchParams({ indexFrom: String(from), pageSize: String(size), year: String(year), reportType: 'rdf', periode: 'audit', kodeEmiten: '' });
+    const json = JSON.parse(await idxGet(`${BASE}/primary/ListedCompany/GetFinancialReport?${q}`));
+    const before = out.size;
+    for (const r of (json?.Results ?? []) as Record<string, unknown>[]) if (CODE.test(codeOf(r))) out.add(codeOf(r));
+    // Berhenti kalau halaman ini tidak menambah kode baru (habis, atau server mengabaikan indexFrom).
+    if (out.size === before || out.size >= Number(json?.ResultCount ?? Infinity)) break;
+  }
+  return out;
+}
+
+/**
+ * Semua kode emiten untuk sync massal: yang punya laporan tahunan dua tahun terakhir, ditambah daftar profil
+ * perusahaan IDX kalau tersedia (emiten tanpa laporan akan dilewati saat sync).
+ */
+export async function listEmiten(): Promise<string[]> {
+  const now = new Date().getFullYear();
+  const all = new Set<string>();
+  for (const year of [now - 1, now - 2]) for (const c of await codesWithAnnual(year)) all.add(c);
+  try {
+    const q = new URLSearchParams({ emitenType: 's', start: '0', length: '9999' });
+    const json = JSON.parse(await idxGet(`${BASE}/primary/ListedCompany/GetCompanyProfiles?${q}`));
+    for (const r of (json?.data ?? []) as Record<string, unknown>[]) if (CODE.test(codeOf(r))) all.add(codeOf(r));
+  } catch {
+    // daftar profil opsional
+  }
+  return [...all].sort();
+}
+
 async function fetchAnnual(code: string, year: number): Promise<Report | undefined> {
   const f = await findXlsx(code, year);
   if (!f) return;

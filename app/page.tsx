@@ -1,14 +1,45 @@
 'use client';
 
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useMemo, useState, useSyncExternalStore, type FormEvent } from 'react';
 import { InputsForm } from '@/components/InputsForm';
 import { Report } from '@/components/Report';
 import { fromForm, toForm } from '@/lib/fields';
 import { score } from '@/lib/score';
 import type { AnalyzeResponse, Meta, Year } from '@/lib/types';
 
-/** Dipakai kalau belum ada kode tersimpan. */
+/** Tombol cepat awal; selanjutnya diganti saham yang terakhir dicek di perangkat ini. */
 const QUICK = ['BBCA', 'BBRI', 'BMRI', 'TLKM', 'ASII', 'ICBP'];
+const RECENT_KEY = 'cek-saham:recent';
+const NONE: string[] = [];
+
+/** 8 saham terakhir yang dicek di perangkat ini, disimpan di browser. */
+const recent = (() => {
+  const listeners = new Set<() => void>();
+  let cache: string[] | null = null;
+  const get = () => {
+    if (cache) return cache;
+    try {
+      cache = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]');
+    } catch {
+      cache = [];
+    }
+    return cache!;
+  };
+  return {
+    get,
+    server: () => NONE,
+    subscribe: (fn: () => void) => (listeners.add(fn), () => void listeners.delete(fn)),
+    add(c: string) {
+      cache = [c, ...get().filter((x) => x !== c)].slice(0, 8);
+      try {
+        localStorage.setItem(RECENT_KEY, JSON.stringify(cache));
+      } catch {
+        // penyimpanan browser tidak tersedia
+      }
+      listeners.forEach((fn) => fn());
+    },
+  };
+})();
 const clean = (s: string) => s.toUpperCase().replace(/[^A-Z0-9]/g, '');
 
 export default function Home() {
@@ -16,21 +47,13 @@ export default function Home() {
   const [form, setForm] = useState(() => toForm({}));
   const [meta, setMeta] = useState<Meta | null>(null);
   const [history, setHistory] = useState<Year[]>([]);
-  const [quick, setQuick] = useState<string[]>(QUICK);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const inputs = useMemo(() => fromForm(form), [form]);
   const result = useMemo(() => score(inputs, history), [inputs, history]);
 
-  // Tombol cepat = saham yang sudah tersimpan (di Vercel: yang sudah di-sync dari Mac).
-  const loadCodes = () =>
-    fetch('/api/codes')
-      .then((r) => r.json())
-      .then((j: { codes?: string[] }) => j.codes?.length && setQuick(j.codes))
-      .catch(() => {});
-  useEffect(() => {
-    loadCodes();
-  }, []);
+  const recentCodes = useSyncExternalStore(recent.subscribe, recent.get, recent.server);
+  const quick = recentCodes.length ? recentCodes : QUICK;
 
   async function load(req: () => Promise<Response>) {
     setBusy(true);
@@ -43,7 +66,7 @@ export default function Home() {
       setForm(toForm(data.inputs));
       setMeta(data.meta);
       setHistory(data.history ?? []);
-      loadCodes();
+      recent.add(data.inputs.ticker);
       setCode(data.inputs.ticker);
     } catch {
       setError('Server tidak merespons. Pastikan npm run dev masih berjalan.');

@@ -91,3 +91,8 @@ export interface AnalyzeResponse {
   history: Year[];
   meta: Meta;
 }
+
+/** Hasil olahan yang disimpan (tanpa harga, karena harga diambil saat dibuka). Satu file JSON per emiten. */
+export interface Stored extends AnalyzeResponse {
+  savedAt: number;
+}
